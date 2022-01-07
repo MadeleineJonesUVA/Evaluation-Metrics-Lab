@@ -1,0 +1,175 @@
+---
+title: "Evaluation Metrics Lab"
+author: "Madeleine Jones"
+date: "10/27/2021"
+output: 
+  html_document:
+    toc: TRUE
+    toc_float: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(caret)
+library(class)
+library(plotly)
+library(RColorBrewer)
+library(ROCR)
+library(MLmetrics)
+```
+
+### Background and Question 
+
+I am a grocery store owner who is trying to decide what red wines to stock my store with.  I have customer-rated quality data for my previous wines as well as measurements regarding the characteristics of each.  Using data from our previously stocked wines, I will use characteristics to determine which previously stocked wines are the "nearest neighbors" to the new wines in terms of characteristics such as alcohol content, pH, residual sugars, etc. Then I will predict whether each of the possible new wines will be a success or failure in terms of customer-rated quality based on the success and failure percentages of the k nearest neighbors.
+
+Business Question: Which wines should I stock my store with to ensure the greatest customer quality ratings? 
+
+### Reading and Cleaning the Data 
+```{r}
+rawdata <- read.csv("/Users/mj/Desktop/2021 Fall/DS 3001/DS-3001/data/winequality-red-ddl.csv")
+
+wine <- select(rawdata, -c(text_rank)) 
+wine$quality<-as.factor(ifelse(wine$quality>=6,1,0))
+
+wine <- wine[complete.cases(wine), ]
+
+str(wine)
+```
+
+### Three Key Metrics to Track 
+To begin, as a grocery store owner, my primary goal is to stock my shelves with good-quality items.  Therefore, in terms of wine predictions, I am most concerned with the false positive rate as this rate indicates the amount of wines that are predicted to be high quality, that are in fact not.  If the false positive rate is high, I could be unknowingly selling customers poor-quality wines, and thus lose business.  I want to ensure that the false positive rate is low so that I know I am only stocking my store with high-quality wines for my customers.  
+
+Another key metric I will be tracking is Log-Loss as this metric will penalize my model more for incorrectly classifying wines by a greater margin (having greater probabilistic confidence in an incorrect answer).  This metric is important to me because if there is a wine that my model predicts to be in the positive class with large probabilistic confidence, I need to trust that the wine will indeed receive high quality ratings, rather than being a poorer quality wine that my model predicted with high confidence incorrectly.  
+
+Finally, the third key metric I am looking to track is F1 score because there is a slight imbalance of our target class, Quality.  The positive class, indicated by a 1, has around 100 more observations than the negative class, indicated by a 0.  F1 Score uses a harmonic mean calculation and is more sensitive to these imbalances, and thus will give us a good idea of the accuracy of our model with the imbalance of positive and negative classes taken into consideration.  
+
+### Prevalence For Comparison
+```{r}
+prevalence <- 1- table(wine$`quality`)[[1]]/length(wine$`quality`)
+prevalence
+```
+
+The positive class prevalence is 0.53.  We will use this metric as a baseline because a model that predicts solely the positive class will be correct around 53% of the time.  Therefore, for our model to be useful, we are looking for an accuracy of greater than 0.53.  
+
+
+### Building and Evaluating a kNN Model
+```{r}
+#scale the data so kNN will operate correctly 
+scaledwine <- as.data.frame(scale(wine[1:11], center = TRUE, scale = TRUE)) 
+
+set.seed(10)
+
+wine_sample <- sample(2, nrow(scaledwine), replace=TRUE, prob=c(0.67, 0.33))
+#We then just need to use the new variable to create the test/train outputs, selecting the first four rows as they are the numeric data in the iris data set and we want to predict Species 
+
+set.seed(10)
+scaledwine$quality <- wine$quality #adding back in the label for caret
+wine_training_car <- scaledwine[wine_sample==1, 1:12]  
+wine_test_car <- scaledwine[wine_sample==2, 1:12]
+trctrl <- trainControl(method = "repeatedcv",
+                       number = 10,
+                       repeats = 3) # generic control to pass back into the knn mode using the cross validation method. 
+
+wine_knn <- train(quality~.,
+                  data = wine_training_car,
+                  method="knn",
+                  tuneLength=10,
+                  trControl= trctrl,#cv method above, will select the optimal K
+                  preProcess="scale") #already did this but helpful reference
+
+wine_eval <-predict(wine_knn, wine_test_car)
+
+wine_eval_prob <- predict(wine_knn, wine_test_car, type = "prob")  # gets the raw predicted probabilities
+
+wine_eval_prob$test <- wine_test_car$quality
+```
+
+#### Confusion Matrix
+
+```{r}
+confusionMatrix(wine_eval, wine_test_car$quality)
+```
+
+
+#### ROC/AUC
+
+ROC Curve:
+
+```{r}
+#In order to use most evaluation packages it's just easier to have are predictions and targets in one place. 
+
+wine_eval <- tibble(pred_class=wine_eval, pred_prob=wine_eval_prob$`1`,target=as.numeric(wine_test_car$quality))
+
+pred <- prediction(wine_eval$pred_prob,wine_eval$target) # use predicted prob and target at different threshold levels to build ROC curve
+
+knn_perf <- performance(pred,"tpr","fpr") # prediction for True Pos Rate and False Pos Rate 
+
+plot(knn_perf, colorize=TRUE) # plot ROC curve
+
+```
+
+AUC Value: 
+
+```{r}
+tree_perf_AUC <- performance(pred,"auc")
+
+print(tree_perf_AUC@y.values)
+```
+
+#### LogLoss
+```{r}
+-(LogLoss(as.numeric(wine_eval$pred_prob), as.numeric(wine_test_car$quality)))
+#We want this number to be rather close to 0
+
+```
+
+
+#### F1 Score 
+```{r}
+pred_1 <- ifelse(wine_eval_prob$`1` < 0.5, 0, 1)
+
+F1_Score(y_pred = pred_1, y_true = wine_eval_prob$test, positive = "1")  # want to be close to 1
+```
+
+### Summarizing Key Metric Outputs 
+
+The first key metric, False Positive Rate, is equal to 1-Specificity, and we are looking for a value that is close to 0. Our FPR is 1 - 0.7422 = 0.2578.  This means that there is a roughly 25% chance that a poor-quality wine will be predicted to be a high-quality wine.  This metric raises concerns because we are likely to stock our store with a wine that is predicted to be high quality, but in actuality is poor quality.  This has the potential to drive away business if customers are not satisfied with the wines we are offering.  
+
+The second key metric, Log Loss, measures uncertainty by evaluating the average log differences of corrected probabilities.  It indicates the magnitude of how far off predictions are, with values near 0 being more desirable.  Our Log Loss value of 0.019 is relatively close to 0.  Therefore, we can conclude that the model's more extreme, or confident, probabilistic values should be trustworthy. Given this, by selecting wines that have a high predicted probability, we can be confident that these wines are indeed of high-quality.  
+
+Finally, the third metric, F1 Score is an indication of the model's accuracy using sensitivity and specificity in order to take class imbalances into account.  Our model's F1 score is 0.73, which indicated that the model has an accuracy of around 73%.  This is a large improvement from our baseline accuracy of 53% which could be obtained from a model solely predicting the positive class.  While this 20% increase in accuracy beneficial, I am still not overly satisfied with an F1 score of 73% and would prefer a score of at least 0.80, or 80%.
+
+### Miss-Classification Errors
+It appears that there is a decent amount of miss-classification of both the positive class (1's), high quality wines, and the negative class (0's), poor quality wines.  However, it appears that there is a greater percentage of poor quality wines that are predicted as high quality, 76 out of 244, than high quality wines that are predicted as poor quality, 66 our of 256.  Furthermore, given that we would not stock wines that are predicted to be low quality, we are more concerned with the possibility of stocking poor quality wines that are predicted to be high quality.  Therefore, the miss-classification of poor quality wines are predicted to be high quality must be addressed.  Although there does not appear to be any obvious patterns with this miss-classification, adjusting the threshold to a higher value (above the default of 0.5), should lower the number of poor quality wines that are predicted to be high quality.  
+
+### Adjusting the Threshold
+```{r}
+#Quick function to explore various threshold levels and output a confusion matrix
+
+adjust_thres <- function(x, y, z) {
+  #x=pred_probablities (continuous probs, not 1's and 0's), y=threshold, z=test_outcome
+  thres <- as.factor(ifelse(x > y, 1,0))
+  confusionMatrix(thres, z, positive = "1", dnn=c("Prediction", "Actual"), mode = "everything")
+}
+
+set.seed(10)
+adjust_thres(wine_eval_prob$`1`,.55, wine_test_car$quality)
+```
+
+Adjusting the threshold to 0.55 rather than 0.5, correctly classifies 3 more poor quality wines than the initial model did.  Adjusting to a threshold any larger than 0.55 or any smaller than 0.5 begins to greatly decrease the accuracy and decrease the number of correctly identified high-quality wines.  Given that the ultimate goal is to identify which wines are high-quality and should be stocked in our stores, I do not want to adjust the threshold any more to combat incorrectly predicted positive wines and the False Positive Rate as it comes at the expense of the correctly predicted positive wines and the True Positive Rate.  The log-loss values have likely not changed a great deal as the threshold has only been altered by 0.05, and the F1 Score has only increase slightly from 0.7304 to 0.7322.  Overall, adjusting the threshold does not appear to greatly benefit the model, unless we are willing to sacrifice some evaluation metrics for others.  
+
+### Summary of Findings and Recommendations
+
+Overall, I believe this model is a great starting point to identifying which wines are high quality and should be stocked in our stores, and which wines are not. The Sensitivity and Specificity metrics are around 0.7 which indicates the False Positive Rate is around 0.3.  This FPR suggests that of our poor-quality wines, 30% were predicted to be high-quality instead. Because this current FPR is relatively high and we want to avoid stocking our shelves with poor quality wines, this is one key metric I would continue to focus on decreasing. Further, the accuracy as indicated by F1 Score is around 0.73 suggesting that our model accuracy is a 20% improvement over our baseline accuracy of 53%.  While this improvement is a step in the right direction, I want to improve this accuracy to at least 0.8 so that I am 80% confident that the wines I am stocking are high quality.  Finally, the Log-Loss score of 0.019 suggests that when our model is incorrect, it is not overly confident in its incorrect prediction. I am satisfied with this metric as it means that when my model is confident in a high quality prediction, it is often correct so I can be confident in my wines as well.  
+
+For the current year, I would suggest stocking our store with wines that have a raw predicted probability of 0.80 or greater.  These wines were predicted with the most confidence to be high-quality, and given that the model predicted 190 high-quality wines correctly out of 256 high-quality predictions, I am confident that customers will be satisfied with the wine selection offered.  In terms of improving our model and continuing evaluation, I have two suggestions.  The first is to document additional wine characteristics such as brand and and location of production.  This is because customers may prefer wine from certain brands or specific regions, regardless of their taste or content make-up. Second, I would recommend continuing to collect data on wines stocked for the current year so that our data set can be expanded to include the data of wines that are not yet recorded.  Both of these additions to the data, wine characteristics and wine observations, will help with training the model in future years and hopefully increase accuracy so that we can be confident in the wines we provide our customers.  
+
+
+
+
+
+
